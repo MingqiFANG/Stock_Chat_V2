@@ -1,0 +1,14 @@
+stock-chat/
+├─ app.py # Streamlit 入口：页面布局、聊天逻辑、引擎切换
+├─ requirements.txt # 依赖
+└─ modules/
+    ├─ __init__.py # 使其成为包
+    ├─ shared_state.py # 共享全局 df（供工具模块引用）
+    ├─ data_source.py # 侧边栏数据源：上传/默认CSV + 缓存 + 填充
+    ├─ df_tools.py # DataFrame 工具函数 & 对应 function-calling schema
+    ├─ kb.py # 字段知识库（KB）工具
+    ├─ tooling.py # 聚合所有 tools 与 REGISTRY
+    ├─ limits.py # 限流/裁剪/安全封装工具
+    ├─ heuristics.py # 是否联网等启发式判断
+    ├─ tool_loop.py # DeepSeek 工具链核心循环（调用模型+执行工具）
+    └─ query_case.py # 用于测试的用户问题
