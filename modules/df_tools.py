@@ -4,10 +4,49 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from . import shared_state as S
+import re
 
 # 统一获取全局 DataFrame（由 data_source 写入 S.df）
 def _df() -> pd.DataFrame:
     return S.df if S.df is not None else pd.DataFrame()
+
+# =========================
+# 小工具：保证日期比较/最新切片的类型一致
+# =========================
+def _slice_latest(d: pd.DataFrame, date_col: str):
+    """返回(最新交易日切片, latest_value)。用布尔索引避免 .query 与类型不一致。"""
+    if date_col not in d.columns:
+        return d.iloc[0:0].copy(), None
+    latest = d[date_col].max()
+    return d[d[date_col] == latest], latest
+
+def _between_dates_mask(s: pd.Series, start: str, end: str):
+    """
+    让左右两端与 Series 保持一致的类型：
+    - 若 s 是数值型：把 start/end 转 int（失败则转成字符串后按字符串比较）
+    - 若 s 是字符串/对象：全转成字符串比较
+    """
+    if pd.api.types.is_numeric_dtype(s):
+        try:
+            st = int(start)
+            ed = int(end)
+            return (s >= st) & (s <= ed)
+        except Exception:
+            s2 = s.astype(str)
+            return (s2 >= str(start)) & (s2 <= str(end))
+    else:
+        s2 = s.astype(str)
+        return (s2 >= str(start)) & (s2 <= str(end))
+
+def _retry_numeric_literal_query(expr: str) -> str:
+    """
+    把 '20250101' 这类纯数字字符串与比较运算的场景改成不带引号，缓解
+    'Invalid comparison between dtype=int64 and str'。
+    仅处理 ==, >=, <=, >, < 这些最常见运算。
+    """
+    expr2 = re.sub(r"(==|>=|<=|>|<)\s*'(\d+)'", r"\1 \2", expr)
+    expr2 = re.sub(r"(==|>=|<=|>|<)\s*\"(\d+)\"", r"\1 \2", expr2)
+    return expr2
 
 # =========================
 # 基础工具
@@ -30,6 +69,15 @@ def df_query(expr: str, n: int = 1000):
         out = _df().query(expr)
         return out.head(n).to_csv(index=False)
     except Exception as e:
+        # 针对 int64 vs str 的典型比较错误，自动重写一次表达式后重试
+        msg = str(e)
+        if "Invalid comparison between dtype=int64 and str" in msg or "TypeError" in msg:
+            expr2 = _retry_numeric_literal_query(expr)
+            try:
+                out = _df().query(expr2)
+                return out.head(n).to_csv(index=False)
+            except Exception:
+                return f"ERROR: {e}"
         return f"ERROR: {e}"
 
 # 对应的 function-calling 描述
@@ -173,7 +221,7 @@ def df_between_dates(start: str, end: str, date_col: str = "trade_date", n: int 
     d = _df()
     if date_col not in d.columns:
         return "ERROR: invalid date_col"
-    mask = (d[date_col] >= str(start)) & (d[date_col] <= str(end))
+    mask = _between_dates_mask(d[date_col], start, end)
     return d.loc[mask].head(n).to_csv(index=False)
 
 def df_at_latest_date(date_col: str = "trade_date", cols: Optional[List[str]] = None, n: int = 5000):
@@ -251,11 +299,12 @@ def df_factor_momentum(pct_col: str = "pct_chg", window: int = 5, by: str = "ts_
     if pct_col not in d.columns or by not in d.columns or date_col not in d.columns:
         return "ERROR: invalid columns"
     retw = d.groupby(by)[pct_col].rolling(window, min_periods=max(2, window // 2)).mean().reset_index(level=0, drop=True)
-    latest = d[date_col].max()
     temp = d.assign(ret_w=retw)
+    latest_slice, latest = _slice_latest(temp, date_col)
+    if latest is None or latest_slice.empty:
+        return "ERROR: no latest date"
     out = (
-        temp.query(f"{date_col} == '{latest}'")
-        .dropna(subset=["ret_w"])
+        latest_slice.dropna(subset=["ret_w"])
         .assign(score=lambda x: x["ret_w"])
         .sort_values("score", ascending=False)
         .head(topk)[[by, date_col, "score", "ret_w"]]
@@ -272,11 +321,12 @@ def df_factor_volatility(pct_col: str = "pct_chg", window: int = 20, by: str = "
         .rolling(window, min_periods=max(3, window // 3)).std()
         .reset_index(level=0, drop=True)
     )
-    latest = d[date_col].max()
     temp = d.assign(sigma=sigma)
+    latest_slice, latest = _slice_latest(temp, date_col)
+    if latest is None or latest_slice.empty:
+        return "ERROR: no latest date"
     out = (
-        temp.query(f"{date_col} == '{latest}'")
-        .dropna(subset=["sigma"])
+        latest_slice.dropna(subset=["sigma"])
         .assign(score=lambda x: -x["sigma"])  # 波动越小越好
         .sort_values("score", ascending=False)
         .head(topk)[[by, date_col, "score", "sigma"]]
@@ -289,11 +339,12 @@ def df_factor_volume(vol_col: str = "vol", window: int = 5, by: str = "ts_code",
     if vol_col not in d.columns or by not in d.columns or date_col not in d.columns:
         return "ERROR: invalid columns"
     volchg = d.groupby(by)[vol_col].pct_change(window)
-    latest = d[date_col].max()
     temp = d.assign(vol_chg_w=volchg)
+    latest_slice, latest = _slice_latest(temp, date_col)
+    if latest is None or latest_slice.empty:
+        return "ERROR: no latest date"
     out = (
-        temp.query(f"{date_col} == '{latest}'")
-        .dropna(subset=["vol_chg_w"])
+        latest_slice.dropna(subset=["vol_chg_w"])
         .assign(score=lambda x: x["vol_chg_w"])
         .sort_values("score", ascending=False)
         .head(topk)[[by, date_col, "score", "vol_chg_w"]]
@@ -315,16 +366,16 @@ def df_join_factors(weights_json, date_col: str = "trade_date", by: str = "ts_co
     if miss:
         return f"ERROR: missing factor columns: {miss}"
 
-    latest = d[date_col].max()
-    tmp = d.copy()
     score = None
     for k, w in weights.items():
-        score = (w * tmp[k]) if score is None else (score + w * tmp[k])
-    tmp = tmp.assign(score=score)
+        score = (w * d[k]) if score is None else (score + w * d[k])
+    tmp = d.assign(score=score)
 
+    latest_slice, latest = _slice_latest(tmp, date_col)
+    if latest is None or latest_slice.empty:
+        return "ERROR: no latest date"
     out = (
-        tmp.query(f"{date_col} == '{latest}'")
-        .dropna(subset=["score"])
+        latest_slice.dropna(subset=["score"])
         .sort_values("score", ascending=False)
         .head(topk)[[by, date_col, "score"] + list(weights.keys())]
     )

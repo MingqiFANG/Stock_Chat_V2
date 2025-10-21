@@ -71,6 +71,8 @@ def sidebar_data_section():
                 df_loaded = pd.DataFrame()
 
         if df_loaded is not None:
+            if "trade_date" in df_loaded.columns:
+                df_loaded["trade_date"] = df_loaded["trade_date"].astype(str)
             st.session_state.df = df_loaded.fillna(0)
 
         df = st.session_state.df
